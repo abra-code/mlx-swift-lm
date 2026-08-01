@@ -38,12 +38,44 @@ for await event in stream {
     switch event {
     case .chunk(let text):
         print(text, terminator: "")
+    case .reasoning(let text):
+        print(text, terminator: "")
     case .toolCall(let call):
         print("\nTool requested: \(call.function.name)")
     case .info(let info):
         print("\nstop=\(info.stopReason) tok/s=\(info.tokensPerSecond)")
     }
 }
+```
+
+## Reasoning
+
+For a model whose `ModelConfiguration.reasoningConfig` resolves (Qwen3, DeepSeek-R1,
+Gemma 4 - see `ReasoningConfig.infer(from:modelId:configData:)`), thinking is split out
+of the decoded stream and delivered as `.reasoning` with its delimiters removed. `.chunk`
+carries the answer alone, and the tool-call parser only ever sees non-reasoning text, so
+tool syntax the model writes inside its scratchpad cannot become a phantom call.
+
+Models with no reasoning protocol are unaffected: their text arrives in `.chunk` exactly
+as before.
+
+Some families (DeepSeek-R1) prefill the opening delimiter into the prompt, so the stream
+only carries the close. The `generate(input:...)` entry points detect that from the
+prompt; a caller driving `generateTask(...)` directly should pass it:
+
+```swift
+let (stream, task) = generateTask(
+    promptTokenCount: lmInput.text.tokens.size,
+    modelConfiguration: context.configuration,
+    tokenizer: context.tokenizer,
+    iterator: iterator,
+    reasoningPrimedInside: context.configuration.reasoningConfig.map {
+        ReasoningEventEmitter.promptEndsInsideReasoning(
+            promptTokens: lmInput.text.tokens.asArray(Int.self),
+            config: $0,
+            tokenizer: context.tokenizer)
+    } ?? false
+)
 ```
 
 ## Task-Handle Pattern for Early Stop

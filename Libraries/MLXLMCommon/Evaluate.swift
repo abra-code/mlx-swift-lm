@@ -1425,7 +1425,7 @@ public func generate(
 /// * Important: if the stream is terminated early (e.g. break from the loop) computation will continue
 /// using the model, parameters, KVCache, etc. for some time (typically a few ms).  This is typically OK for
 /// one-shot calls, but for "chat session" type calls consider using
-/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:tools:)``
+/// ``generateTask(promptTokenCount:modelConfiguration:tokenizer:iterator:wiredMemoryTicket:tools:reasoningPrimedInside:)``
 /// so that the end of the generation task can be observed.
 ///
 /// - Parameters:
@@ -1458,6 +1458,8 @@ public func generate(
 ///     switch generation {
 ///     case .chunk(let text):
 ///         print("Generated text: \(text)")
+///     case .reasoning(let text):
+///         print("Reasoning: \(text)")
 ///     case .info(let info):
 ///         print("Finished: \(info.tokensPerSecond) tokens/s.")
 ///     case .toolCall(let call):
@@ -1478,7 +1480,10 @@ public func generate(
         tokenizer: context.tokenizer,
         iterator: iterator,
         wiredMemoryTicket: wiredMemoryTicket,
-        tools: tools)
+        tools: tools,
+        reasoningPrimedInside: promptPrimesReasoning(
+            input: input, modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer))
     return stream
 }
 
@@ -1508,6 +1513,8 @@ public func generate(
 ///     switch generation {
 ///     case .chunk(let text):
 ///         print("Generated text: \(text)")
+///     case .reasoning(let text):
+///         print("Reasoning: \(text)")
 ///     case .info(let info):
 ///         print("Finished: \(info.tokensPerSecond) tokens/s.")
 ///     case .toolCall(let call):
@@ -1555,7 +1562,11 @@ public func generate(
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
             stopStrings: context.configuration.effectiveStopStrings,
-            format: context.configuration.toolCallFormat ?? .json
+            format: context.configuration.toolCallFormat ?? .json,
+            reasoningConfig: context.configuration.reasoningConfig,
+            reasoningPrimedInside: promptPrimesReasoning(
+                input: input, modelConfiguration: context.configuration,
+                tokenizer: context.tokenizer)
         )
     )
     return stream
@@ -1575,7 +1586,10 @@ public func generate(
         modelConfiguration: context.configuration,
         tokenizer: context.tokenizer,
         iterator: iterator,
-        wiredMemoryTicket: wiredMemoryTicket)
+        wiredMemoryTicket: wiredMemoryTicket,
+        reasoningPrimedInside: promptPrimesReasoning(
+            input: input, modelConfiguration: context.configuration,
+            tokenizer: context.tokenizer))
     return stream
 }
 
@@ -1595,6 +1609,11 @@ public func generate(
 ///   - iterator: a token iterator conforming to ``TokenIteratorProtocol``
 ///   - wiredMemoryTicket: Optional wired memory ticket for policy-based coordination.
 ///   - tools: Optional tool schemas used to parse tool-call arguments into their declared types.
+///   - reasoningPrimedInside: whether the rendered prompt ends inside an open reasoning
+///     block, which some families prefill (e.g. DeepSeek-R1's trailing `<think>`). Callers
+///     holding the prompt should pass
+///     ``ReasoningEventEmitter/promptEndsInsideReasoning(promptTokens:config:tokenizer:)``;
+///     leaving it `false` would misroute a primed model's whole thought block into `.chunk`.
 /// - Returns: An `AsyncStream` that emits `Generation` values and a `Task`
 public func generateTask<TOKEN: TokenIteratorProtocol>(
     promptTokenCount: Int,
@@ -1602,7 +1621,8 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
     tokenizer: Tokenizer,
     iterator: consuming TOKEN,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    tools: [[String: any Sendable]]? = nil
+    tools: [[String: any Sendable]]? = nil,
+    reasoningPrimedInside: Bool = false
 ) -> (AsyncStream<Generation>, Task<Void, Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
@@ -1614,7 +1634,9 @@ public func generateTask<TOKEN: TokenIteratorProtocol>(
             tokenizer: tokenizer,
             stopStrings: modelConfiguration.effectiveStopStrings,
             format: modelConfiguration.toolCallFormat ?? .json,
-            tools: tools
+            tools: tools,
+            reasoningConfig: modelConfiguration.reasoningConfig,
+            reasoningPrimedInside: reasoningPrimedInside
         )
     )
 }
@@ -1627,7 +1649,8 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
     tokenizer: Tokenizer,
     iterator: consuming TOKEN,
     wiredMemoryTicket: WiredMemoryTicket? = nil,
-    tools: [[String: any Sendable]]? = nil
+    tools: [[String: any Sendable]]? = nil,
+    reasoningPrimedInside: Bool = false
 ) -> (AsyncStream<Generation>, Task<[Int], Never>) {
     generateLoopTask(
         promptTokenCount: promptTokenCount,
@@ -1640,9 +1663,24 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
             tokenizer: tokenizer,
             stopStrings: modelConfiguration.effectiveStopStrings,
             format: modelConfiguration.toolCallFormat ?? .json,
-            tools: tools
+            tools: tools,
+            reasoningConfig: modelConfiguration.reasoningConfig,
+            reasoningPrimedInside: reasoningPrimedInside
         )
     )
+}
+
+/// Whether the rendered prompt ends inside an open reasoning block, for seeding the
+/// token loop's reasoning scanner.
+///
+/// Free for models with no resolved ``ModelConfiguration/reasoningConfig``: the prompt
+/// is only decoded when there is a reasoning protocol to look for.
+func promptPrimesReasoning(
+    input: LMInput, modelConfiguration: ModelConfiguration, tokenizer: Tokenizer
+) -> Bool {
+    guard let config = modelConfiguration.reasoningConfig else { return false }
+    return ReasoningEventEmitter.promptEndsInsideReasoning(
+        promptTokens: input.text.tokens.asArray(Int.self), config: config, tokenizer: tokenizer)
 }
 
 /// Generates raw token IDs asynchronously using the provided language model input, parameters, and context.
@@ -1779,7 +1817,11 @@ public func generate(
         handler: TextToolTokenLoopHandler(
             tokenizer: context.tokenizer,
             stopStrings: context.configuration.effectiveStopStrings,
-            format: context.configuration.toolCallFormat ?? .json
+            format: context.configuration.toolCallFormat ?? .json,
+            reasoningConfig: context.configuration.reasoningConfig,
+            reasoningPrimedInside: promptPrimesReasoning(
+                input: input, modelConfiguration: context.configuration,
+                tokenizer: context.tokenizer)
         )
     )
     return stream
@@ -2181,11 +2223,21 @@ public struct GenerateCompletionInfo: Sendable {
 ///
 /// This enum distinguishes between the following:
 /// - `.chunk`: A decoded string from one or more tokens generated by the language model.
+/// - `.reasoning`: A decoded string the model emitted inside a reasoning block.
 /// - `.toolCall`: A tool call parsed from the generated output.
 /// - `.info`: Metadata and performance statistics about the generation process.
 public enum Generation: Sendable {
     /// A generated text chunk as a String.
     case chunk(String)
+
+    /// A generated text chunk the model emitted inside a reasoning
+    /// (chain-of-thought) block, with the block's delimiters removed.
+    ///
+    /// Only produced for models whose ``ModelConfiguration/reasoningConfig`` was
+    /// resolved (see ``ReasoningConfig/infer(from:modelId:configData:)``). For any
+    /// other model the text arrives in ``chunk`` exactly as before - including,
+    /// for an unrecognized reasoning family, its raw delimiters.
+    case reasoning(String)
 
     /// Completion information summarizing token counts and performance metrics.
     case info(GenerateCompletionInfo)
@@ -2197,6 +2249,17 @@ public enum Generation: Sendable {
     public var chunk: String? {
         switch self {
         case .chunk(let string): string
+        case .reasoning: nil
+        case .info: nil
+        case .toolCall: nil
+        }
+    }
+
+    /// Reasoning text or nil
+    public var reasoning: String? {
+        switch self {
+        case .chunk: nil
+        case .reasoning(let string): string
         case .info: nil
         case .toolCall: nil
         }
@@ -2206,6 +2269,7 @@ public enum Generation: Sendable {
     public var info: GenerateCompletionInfo? {
         switch self {
         case .chunk: nil
+        case .reasoning: nil
         case .info(let info): info
         case .toolCall: nil
         }
@@ -2215,6 +2279,7 @@ public enum Generation: Sendable {
     public var toolCall: ToolCall? {
         switch self {
         case .chunk: nil
+        case .reasoning: nil
         case .info: nil
         case .toolCall(let toolCall): toolCall
         }
@@ -2264,13 +2329,13 @@ public enum TokenGeneration: Sendable {
 
 // MARK: - TokenLoopHandlers
 
-private enum TokenLoopDisposition {
+enum TokenLoopDisposition {
     case more
     case stop
     case cancelled
 }
 
-private protocol TokenLoopHandler {
+protocol TokenLoopHandler {
     associatedtype Output
 
     /// Return `.stop` for semantic generation stops, or `.cancelled` for consumer termination.
@@ -2379,20 +2444,31 @@ struct StopStringFilter {
     }
 }
 
-private struct TextToolTokenLoopHandler: TokenLoopHandler {
+/// Internal rather than private so unit tests can drive the text path without a
+/// model, as with ``StopStringFilter``.
+struct TextToolTokenLoopHandler: TokenLoopHandler {
     typealias Output = Generation
 
     var detokenizer: NaiveStreamingDetokenizer
     var stopStringFilter: StopStringFilter
     let toolCallProcessor: ToolCallProcessor
 
+    /// Splits reasoning out of the decoded text, or `nil` for models with no
+    /// resolved ``ReasoningConfig`` (their text passes straight through).
+    var reasoningEmitter: ReasoningEventEmitter?
+
     init(
         tokenizer: Tokenizer, stopStrings: Set<String> = [], format: ToolCallFormat,
-        tools: [[String: any Sendable]]? = nil
+        tools: [[String: any Sendable]]? = nil,
+        reasoningConfig: ReasoningConfig? = nil,
+        reasoningPrimedInside: Bool = false
     ) {
         detokenizer = NaiveStreamingDetokenizer(tokenizer: tokenizer)
         stopStringFilter = StopStringFilter(stopStrings: stopStrings)
         toolCallProcessor = ToolCallProcessor(format: format, tools: tools)
+        reasoningEmitter = reasoningConfig.map {
+            ReasoningEventEmitter(config: $0, primedInside: reasoningPrimedInside)
+        }
     }
 
     mutating func onToken(
@@ -2433,6 +2509,23 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
             }
         }
 
+        // Drain the reasoning scanner before the tool-call processor, for the same
+        // reason that drain exists: an end delimiter that never arrives as text
+        // must not strand the buffer. What it flushes may still be response text
+        // the tool-call processor has to see, so it goes through `processResponse`.
+        for segment in reasoningEmitter?.finalize() ?? [] {
+            switch segment {
+            case .reasoning(let reasoning):
+                if case .terminated = emit(.reasoning(reasoning)) {
+                    return
+                }
+            case .response(let response):
+                guard case .more = processResponse(response, emit: emit) else {
+                    return
+                }
+            }
+        }
+
         if let bufferedText = toolCallProcessor.processEOS(returnBufferedText: true),
             !bufferedText.isEmpty
         {
@@ -2452,7 +2545,38 @@ private struct TextToolTokenLoopHandler: TokenLoopHandler {
         .info(info)
     }
 
-    private mutating func processText(
+    /// Splits reasoning out first, and lets only non-reasoning text reach the
+    /// tool-call parser: a model that writes `<|tool_call>` inside its scratchpad
+    /// would otherwise produce a phantom tool call.
+    mutating func processText(
+        _ text: String,
+        emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
+    ) -> TokenLoopDisposition {
+        guard !text.isEmpty else {
+            return .more
+        }
+
+        guard let segments = reasoningEmitter?.process(text) else {
+            return processResponse(text, emit: emit)
+        }
+
+        for segment in segments {
+            switch segment {
+            case .reasoning(let reasoning):
+                if case .terminated = emit(.reasoning(reasoning)) {
+                    return .cancelled
+                }
+            case .response(let response):
+                guard case .more = processResponse(response, emit: emit) else {
+                    return .cancelled
+                }
+            }
+        }
+
+        return .more
+    }
+
+    private mutating func processResponse(
         _ text: String,
         emit: (sending Generation) -> AsyncStream<Generation>.Continuation.YieldResult
     ) -> TokenLoopDisposition {

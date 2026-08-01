@@ -167,6 +167,10 @@ for await generation in stream {
     switch generation {
     case .chunk(let text):
         print(text, terminator: "")
+    case .reasoning(let text):
+        // Thinking, delimiters removed. Only for models with a resolved
+        // `ReasoningConfig` (Qwen3, DeepSeek-R1, Gemma 4).
+        print(text, terminator: "")
     case .toolCall(let call):
         print("Tool call: \(call.function.name)")
     case .info(let info):

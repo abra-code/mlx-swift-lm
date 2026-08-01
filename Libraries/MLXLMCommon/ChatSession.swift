@@ -928,7 +928,10 @@ public final class ChatSession {
                                     modelConfiguration: modelConfiguration,
                                     tokenizer: tokenizer,
                                     iterator: iterator,
-                                    tools: tools)
+                                    tools: tools,
+                                    reasoningPrimedInside: promptPrimesReasoning(
+                                        input: input, modelConfiguration: modelConfiguration,
+                                        tokenizer: tokenizer))
                             )
                         }
 
@@ -1023,7 +1026,11 @@ public final class ChatSession {
                                             modelConfiguration: modelConfiguration,
                                             tokenizer: tokenizer,
                                             iterator: iterator,
-                                            tools: tools))
+                                            tools: tools,
+                                            reasoningPrimedInside: promptPrimesReasoning(
+                                                input: input,
+                                                modelConfiguration: modelConfiguration,
+                                                tokenizer: tokenizer)))
                                 }
                             }
                         } else {

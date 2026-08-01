@@ -270,6 +270,9 @@ public enum ChatSessionTests {
             case .chunk(let text):
                 print(text, terminator: "")
                 responseText += text
+            case .reasoning:
+                // Reasoning is routed to its own case and is not part of the answer.
+                break
             case .toolCall(let toolCall):
                 toolCalls.append(toolCall)
             case .info(let completionInfo):
@@ -350,6 +353,8 @@ public enum ChatSessionTests {
             switch generation {
             case .chunk(let text):
                 followUpText += text
+            case .reasoning:
+                break
             case .toolCall(let call):
                 followUpCalls.append(call)
             case .info(let info):
@@ -904,6 +909,8 @@ public enum ToolCallTests {
                 switch generation {
                 case .chunk(let chunk):
                     text += chunk
+                case .reasoning:
+                    break
                 case .toolCall(let toolCall):
                     toolCalls.append(toolCall)
                 case .info:

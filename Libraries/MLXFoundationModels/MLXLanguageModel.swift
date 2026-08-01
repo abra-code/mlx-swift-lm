@@ -1708,6 +1708,15 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 case .chunk(let text):
                     await Self.emit(
                         text: text, entryID: entryID, destination: .response, into: channel)
+                case .reasoning:
+                    // Reachable only for a model with a resolved ReasoningConfig
+                    // whose caller did NOT declare .reasoning: the prompt was
+                    // re-rendered with thinking off and the model thought anyway.
+                    // Routing that to .response would leak thinking into the answer,
+                    // the exact thing the capability gate exists to prevent, and
+                    // this path has no reasoning entry to route it to -- so it is
+                    // dropped. `runReasoning` is the path that consumes it.
+                    break
                 case .info(let info):
                     // MLX-LM emits one .info event at end-of-generation with
                     // authoritative scalar token counts (`promptTokenCount`
@@ -1943,10 +1952,9 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
         private static func reasoningPrimedInside(
             input: LMInput, config: ReasoningConfig, tokenizer: any Tokenizer
         ) -> Bool {
-            let tokens = input.text.tokens.asArray(Int.self)
-            let renderedTail = tokenizer.decode(tokenIds: Array(tokens.suffix(64)))
-            return ReasoningEventEmitter.promptEndsInsideReasoning(
-                renderedPromptTail: renderedTail, config: config)
+            ReasoningEventEmitter.promptEndsInsideReasoning(
+                promptTokens: input.text.tokens.asArray(Int.self), config: config,
+                tokenizer: tokenizer)
         }
 
         /// Think-then-call Phase 1: generate reasoning unconstrained until
