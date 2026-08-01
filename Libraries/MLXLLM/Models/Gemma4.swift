@@ -108,3 +108,12 @@ extension Gemma4Model: LoRAModel {
         languageModel.loraLayers
     }
 }
+
+// MARK: - Chat conventions
+
+/// Gemma 4 brackets its thinking in labeled channels rather than a delimiter pair,
+/// so it declares a ``ReasoningConfig`` here rather than being inferred from
+/// `model_type` (see ``ReasoningConfig/gemma4``).
+extension Gemma4Model {
+    public var reasoningConfig: ReasoningConfig? { .gemma4 }
+}
