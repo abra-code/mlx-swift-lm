@@ -1832,6 +1832,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                         output: .init(
                             totalTokenCount: info.generationTokenCount, reasoningTokenCount: 0),
                         entryID: entryID, into: channel)
+                case .reasoning:
+                    // Dropped, not forwarded. `runTextGeneration` sends anything with
+                    // a resolved config to `runReasoning` instead, so reaching here
+                    // means the caller did not declare `.reasoning` and the prompt was
+                    // re-rendered with thinking off. Surfacing it would be exactly the
+                    // leak the capability gate exists to prevent.
+                    break
                 case .toolCall(_):
                     break
                 case .rejectedToolCall(let rejection):
