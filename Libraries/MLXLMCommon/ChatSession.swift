@@ -226,8 +226,18 @@ public final class ChatSession {
         var stopReason: GenerateStopReason?
         var wasTerminatedByConsumer = false
 
+        /// Whether any `.reasoning` arrived, even though none of it is kept.
+        ///
+        /// Reasoning is deliberately not part of ``content``: it is dropped from the
+        /// replayed history, matching what the chat templates of these families do
+        /// themselves. But "produced only thinking" is a turn that happened, and it has
+        /// to be distinguishable from "produced nothing" - a model that runs out of
+        /// `maxTokens` inside its thought block would otherwise look identical to a
+        /// cancelled generation and take the user's message down with it.
+        var producedReasoning = false
+
         var shouldRecord: Bool {
-            (!content.isEmpty || !toolCalls.isEmpty)
+            (!content.isEmpty || !toolCalls.isEmpty || producedReasoning)
                 && rejectedToolCalls.isEmpty
                 && !wasTerminatedByConsumer
                 && stopReason != .cancelled
@@ -236,6 +246,9 @@ public final class ChatSession {
         mutating func consume(_ item: Generation) {
             if let chunk = item.chunk {
                 content += chunk
+            }
+            if item.reasoning != nil {
+                producedReasoning = true
             }
             if let toolCall = item.toolCall {
                 toolCalls.append(toolCall)
@@ -1344,7 +1357,10 @@ public final class ChatSession {
                                     tokenizer: tokenizer,
                                     iterator: iterator,
                                     tools: toolValidationSchemas,
-                                    toolCallPolicy: generateParameters.toolCallPolicy)
+                                    toolCallPolicy: generateParameters.toolCallPolicy,
+                                    reasoningPrimedInside: promptPrimesReasoning(
+                                        input: input, modelConfiguration: modelConfiguration,
+                                        tokenizer: tokenizer))
                             )
                         }
 
@@ -1468,7 +1484,11 @@ public final class ChatSession {
                                             tokenizer: tokenizer,
                                             iterator: iterator,
                                             tools: toolValidationSchemas,
-                                            toolCallPolicy: generateParameters.toolCallPolicy))
+                                            toolCallPolicy: generateParameters.toolCallPolicy,
+                                            reasoningPrimedInside: promptPrimesReasoning(
+                                                input: input,
+                                                modelConfiguration: modelConfiguration,
+                                                tokenizer: tokenizer)))
                                 }
                             }
                         } else {
