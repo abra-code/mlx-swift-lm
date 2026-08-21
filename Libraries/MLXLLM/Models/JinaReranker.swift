@@ -25,7 +25,7 @@ private final class JinaRerankerProjector: Module {
 /// It uses Qwen3 hidden states at `<|embed_token|>` and `<|rerank_token|>` positions,
 /// projects them with `projector.safetensors`, then scores documents by cosine similarity.
 public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionProvider,
-    ListwiseRerankerModel
+    ListwiseRerankerModel, AdditionalWeightFilesProviding
 {
     public let vocabularySize: Int
     public let kvHeads: [Int]
@@ -101,16 +101,31 @@ public final class JinaRerankerModel: Module, LanguageModel, KVCacheDimensionPro
         return scores.asArray(Float.self).map(Double.init)
     }
 
+    /// `jinaai/jina-reranker-v3-mlx` keeps the projector in `projector.safetensors`, which
+    /// neither the conventional `model*.safetensors` names nor `model.safetensors.index.json`
+    /// select, so it has to be requested by name -- as the checkpoint's own `rerank.py` does.
+    ///
+    /// `jinaai/jina-reranker-v3` packages the same model with the projector in its single
+    /// `model.safetensors` and ships no such file. A name that is not present is ignored, so the
+    /// declaration costs that layout nothing.
+    public var additionalWeightFiles: [String] { ["projector.safetensors"] }
+
+    /// Where the two projector layers arrive under each packaging of this model.
+    ///
+    /// - `jinaai/jina-reranker-v3` stores the projector as an `nn.Sequential` of
+    ///   `Linear, ReLU, Linear`, so its layers are numbered by position in the main weight file.
+    /// - `jinaai/jina-reranker-v3-mlx` renames them and moves them into `projector.safetensors`,
+    ///   where they lose the `projector` prefix entirely.
+    private static let projectorKeys = [
+        "projector.0.weight": "projector.linear1.weight",
+        "projector.2.weight": "projector.linear2.weight",
+        "linear1.weight": "projector.linear1.weight",
+        "linear2.weight": "projector.linear2.weight",
+    ]
+
     public func sanitize(weights: [String: MLXArray]) -> [String: MLXArray] {
         weights.reduce(into: [:]) { result, item in
-            switch item.key {
-            case "linear1.weight":
-                result["projector.linear1.weight"] = item.value
-            case "linear2.weight":
-                result["projector.linear2.weight"] = item.value
-            default:
-                result[item.key] = item.value
-            }
+            result[Self.projectorKeys[item.key] ?? item.key] = item.value
         }
     }
 }
