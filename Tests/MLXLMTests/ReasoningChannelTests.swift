@@ -153,6 +153,7 @@ struct ReasoningChannelTests {
             "<|channel>thought\na<channel|>b<|channel>thought\nc<channel|>d",
             "<|channel>thought\ncontains <|tool_call>syntax<channel|>answer",
             "trailing partial marker <|chan",
+            "<|channel>\(String(repeating: "y", count: 33))\nlabel ran past the window<channel|>a",
         ]
 
         for input in corpus {
@@ -206,9 +207,21 @@ struct ReasoningChannelTests {
         let long = String(repeating: "x", count: 200)
         var emitter = ReasoningEventEmitter(config: Self.gemma4, primedInside: false)
         let segments = emitter.process("<|channel>" + long)
-        #expect(!reasoningText(segments).isEmpty)
-        #expect(reasoningText(segments).hasPrefix("x"))
+        // Exact, not a prefix check: a partial swallow would still pass `hasPrefix`.
+        #expect(reasoningText(segments) == long)
         #expect(emitter.isInsideReasoning)
+    }
+
+    /// A terminator just past the window does not end the label, and the text it would
+    /// have labeled stays visible. This pins the `maxLabelLength` boundary itself,
+    /// which the chunk-invariance corpus reaches only from inside the window.
+    @Test func terminatorPastTheWindowIsNotALabel() {
+        let label = String(repeating: "y", count: 33)
+        let segments = run(["<|channel>\(label)\nbody<channel|>answer"])
+
+        #expect(reasoningText(segments) == "\(label)\nbody")
+        #expect(responseText(segments) == "answer")
+        #expect(!leaksMarker(segments))
     }
 
     /// Hiding an unrecognized channel in the reasoning stream is the safe

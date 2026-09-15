@@ -133,9 +133,8 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
         return emitSegments(segments, emit: emit)
     }
 
-    /// `mutating` defensively rather than by necessity: it touches only the
-    /// class-typed processor today, and marking it so means a later change that does
-    /// advance the emitter here cannot silently write to a copy.
+    /// `mutating` so a later change that advances the emitter here cannot write to a
+    /// copy; today it touches only the class-typed processor.
     private mutating func emitSegments(
         _ segments: [ReasoningEventEmitter.Segment],
         emit: (TokenStreamEvent) -> Bool

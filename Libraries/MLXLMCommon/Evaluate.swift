@@ -1993,18 +1993,17 @@ func generateTaskRecordingTokens<TOKEN: TokenIteratorProtocol>(
 /// Whether the rendered prompt ends inside an open reasoning block, for seeding the
 /// token loop's reasoning scanner.
 ///
-/// Free for models with no resolved ``ModelConfiguration/reasoningConfig``: the prompt
-/// is only decoded when there is a reasoning protocol to look for.
-///
-/// Only the prompt's tail is materialized. A prefilled delimiter is the last thing a
-/// generation prompt writes, so scanning further back cannot change the answer, and
-/// copying a 100k-token prompt out of its `MLXArray` to read the final few would cost
-/// more than the check saves.
+/// The prompt is decoded only when the model resolves a
+/// ``ModelConfiguration/reasoningConfig``, and then only its tail: a prefilled
+/// delimiter is the last thing a generation prompt writes, so copying a long prompt
+/// out of its `MLXArray` to read the final few tokens would cost more than it saves.
 func promptPrimesReasoning(
     input: LMInput, modelConfiguration: ModelConfiguration, tokenizer: Tokenizer
 ) -> Bool {
     guard let config = modelConfiguration.reasoningConfig else { return false }
-    let tokens = input.text.tokens
+    // Flatten first. VLM processors emit `[1, N]`, and a range subscript slices axis 0,
+    // so slicing the unflattened array would take the batch axis, not the tokens.
+    let tokens = input.text.tokens.flattened()
     let tail =
         tokens.size > promptTailTokenCount
         ? tokens[(tokens.size - promptTailTokenCount)...]

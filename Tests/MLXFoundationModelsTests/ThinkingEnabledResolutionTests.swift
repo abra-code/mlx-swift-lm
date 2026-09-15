@@ -13,19 +13,14 @@ import Testing
 /// way.
 ///
 /// The regression these guard: the think-then-call gate read the optional as
-/// `!= false`, i.e. "unspecified means think", while the prompt rendered
-/// `?? defaultOn`. Those agree for every `defaultOn: true` family, so the split
-/// was invisible until `ReasoningConfig.gemma4` shipped the first
-/// `defaultOn: false` one. Gemma 4's 31B template then prefilled a *closed*
-/// empty `<|channel>thought\n<channel|>`, no channel ever opened, and a
-/// `.required` tool call silently never arrived.
+/// `!= false` while the prompt rendered `?? defaultOn`. Those agree for every
+/// `defaultOn: true` family, so the split stayed invisible until
+/// `ReasoningConfig.gemma4` shipped the first `defaultOn: false` one.
 ///
-/// RUNTIME REQUIREMENT: `MLXLanguageModel` is `@available(macOS 27.0, ...)`, so
-/// every test here needs a macOS 27 *host*. Building against the macOS 27 SDK is
-/// not enough - on an older host the `#available` guards return early and the
-/// suite reports green without executing a single assertion. That holds for this
-/// whole test target, not just this file. Treat a pass on macOS 26 as "compiled",
-/// never as "covered".
+/// Runtime requirement: `MLXLanguageModel` needs a macOS 27 *host*, not just the
+/// macOS 27 SDK. On an older host the `#available` guards return early and the
+/// suite reports green without asserting anything. Treat a pass on macOS 26 as
+/// "compiled", never as "covered".
 @Suite
 struct ThinkingEnabledResolutionTests {
 

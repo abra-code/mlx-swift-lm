@@ -96,19 +96,15 @@ public struct ReasoningChannel: Sendable, Equatable {
 
     /// Labels whose channel carries the answer rather than reasoning.
     ///
-    /// Every label NOT listed here routes to reasoning. Hiding an unrecognized
-    /// channel in the reasoning stream is the safe direction: nothing is lost (the
-    /// text stays readable) and no scratchpad text or raw marker can reach the
-    /// answer.
+    /// Every other label routes to reasoning, which is the safe direction: the text
+    /// is still delivered, and no scratchpad or raw marker can reach the answer.
     public var responseLabels: Set<String>
 
-    /// How far past the start delimiter a label may run before the opener is
-    /// treated as malformed and its text is shown as reasoning rather than
-    /// consumed as metadata.
+    /// How far past the start delimiter a label may run before the opener counts as
+    /// malformed and its text is shown as reasoning instead of consumed as metadata.
     ///
-    /// Bounding it matters in both directions: without the bound, an opener whose
-    /// label never terminates either buffers the whole generation or silently
-    /// swallows everything up to a distant end delimiter.
+    /// Without a bound, a label that never terminates either buffers the whole
+    /// generation or swallows everything up to a distant end delimiter.
     public var maxLabelLength: Int
 
     public init(
@@ -123,12 +119,9 @@ public struct ReasoningChannel: Sendable, Equatable {
 
     /// Gemma 4: `<|channel>thought\n ... <channel|>` carries reasoning.
     ///
-    /// `content` is listed defensively rather than observed. Every shipped Gemma 4
-    /// template emits only the `thought` label, and Google's own `x-regex` response
-    /// schema names the answer group `content` while leaving it OUTSIDE any channel
-    /// - so an answer arriving channel-wrapped is not expected. Listing the label
-    /// costs nothing, and means a channel-wrapped answer would not be hidden in the
-    /// thought stream if one ever did appear.
+    /// No shipped template wraps the answer in a channel, so `content` is listed
+    /// defensively: it costs nothing and keeps such an answer out of the thought
+    /// stream if one ever appears.
     public static let gemma4 = ReasoningChannel(responseLabels: ["content"])
 }
 
@@ -214,18 +207,14 @@ public struct ReasoningConfig: Sendable, Equatable {
         promptStrategy: .alwaysOn)
 
     /// Gemma 4's protocol: labeled channels (see ``ReasoningChannel/gemma4``), toggled
-    /// via `enable_thinking`, whose template default is thinking OFF.
+    /// via `enable_thinking`, whose template default is thinking off.
     ///
     /// Shared here rather than spelled per model because four types (text, unified,
     /// and the LLM and VLM entry points) declare the same protocol.
     ///
-    /// The markers are not hypothetical. Gemma 4's chat templates vary in how much they
-    /// prefill: the 31B template writes a closed, empty thought block into the generation
-    /// prompt when thinking is off, while the E2B template prefills nothing at all. And
-    /// the 31B template suppresses the whole generation prompt - `<|turn>model` and the
-    /// prefill together - when the previous message was a tool call or tool response,
-    /// which is precisely the turn an agentic client reads. In each of those cases the
-    /// model is expected to open the channel itself, and without this the delimiters
+    /// Gemma 4's templates differ in how much they prefill, and the 31B template
+    /// suppresses the generation prompt entirely after a tool call or tool response.
+    /// The model then opens the channel itself, so without this config its delimiters
     /// reach the caller as literal text.
     public static let gemma4 = ReasoningConfig(
         startDelimiter: "<|channel>", endDelimiter: "<channel|>",
