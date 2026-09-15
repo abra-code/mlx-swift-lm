@@ -200,6 +200,9 @@ public final class ChatSession {
                 uncommittedTokens.removeAll()
             }
 
+            // A turn that produced only reasoning appends an empty assistant message.
+            // That is deliberate: it keeps user/assistant alternation for strict
+            // templates and keeps the user's turn in the transcript.
             var message = Chat.Message.assistant(
                 assistant.content,
                 toolCalls: assistant.toolCalls.isEmpty ? nil : assistant.toolCalls)
@@ -228,12 +231,10 @@ public final class ChatSession {
 
         /// Whether any `.reasoning` arrived, even though none of it is kept.
         ///
-        /// Reasoning is deliberately not part of ``content``: it is dropped from the
-        /// replayed history, matching what the chat templates of these families do
-        /// themselves. But "produced only thinking" is a turn that happened, and it has
-        /// to be distinguishable from "produced nothing" - a model that runs out of
-        /// `maxTokens` inside its thought block would otherwise look identical to a
-        /// cancelled generation and take the user's message down with it.
+        /// Reasoning stays out of ``content`` because these families' templates drop it
+        /// from replayed history. It is tracked anyway so a turn that produced only
+        /// thinking, such as one that hit `maxTokens` mid-thought, is not mistaken for
+        /// an empty generation and rolled back along with the user's message.
         var producedReasoning = false
 
         var shouldRecord: Bool {
