@@ -25,10 +25,9 @@
 /// A canonical end delimiter is framing and is consumed, while an implicit one
 /// is answer/tool content and stays in the stream to be re-scanned outside.
 /// `pendingPrefix` holds text that may be a delimiter split across a chunk
-/// boundary. For a delimiter pair a start delimiter always (re)opens a reasoning
-/// span - so multiple blocks each route, and the cost is a documented limitation:
-/// a literal `<think>` appearing in answer text is misrouted (the deferred
-/// token-ID detection is the real fix).
+/// boundary. For a delimiter pair, a start delimiter always (re)opens a reasoning
+/// span, so multiple blocks each route. The known cost is that a literal `<think>`
+/// in answer text is misrouted; token-id detection is the real fix.
 public struct ReasoningEventEmitter: Sendable {
 
     /// A routed slice of the decoded stream.
@@ -131,11 +130,9 @@ public struct ReasoningEventEmitter: Sendable {
     /// Whether a rendered prompt, given as its token ids, ends inside an open
     /// reasoning block.
     ///
-    /// Decodes only the prompt tail: a prefilled delimiter is the last thing a
-    /// generation prompt writes, so scanning further back cannot change the
-    /// answer and would cost a full-prompt decode. Special tokens are kept:
-    /// families whose delimiters are special tokens (Gemma 4, Qwen3) would
-    /// otherwise decode to nothing.
+    /// Decodes only the prompt tail, since a prefilled delimiter is the last thing a
+    /// generation prompt writes. Special tokens are kept: families whose delimiters
+    /// are special tokens (Gemma 4, Qwen3) would otherwise decode to nothing.
     public static func promptEndsInsideReasoning(
         promptTokens: [Int], config: ReasoningConfig, tokenizer: any Tokenizer
     ) -> Bool {
@@ -146,7 +143,7 @@ public struct ReasoningEventEmitter: Sendable {
     }
 
     /// How many trailing prompt tokens ``promptEndsInsideReasoning(promptTokens:config:tokenizer:)``
-    /// decodes. Generous next to the few tokens a prefill occupies.
+    /// decodes. Well above the few tokens a prefill occupies.
     private static let promptTailTokenCount = 64
 
     /// Whether the scanner is currently inside a reasoning span.
@@ -238,9 +235,8 @@ public struct ReasoningEventEmitter: Sendable {
     public mutating func finalize() -> [Segment] {
         var output: [Segment] = []
         if case .label = state {
-            // The label never terminated. We are still inside the channel, so keep
-            // routing to reasoning rather than pretending the block ended - and
-            // stop waiting for a label no further chunk will supply.
+            // The label never terminated and no further chunk will supply one. The
+            // channel is still open, so route what is left to reasoning.
             state = .inside(.reasoning)
         }
         if !pendingPrefix.isEmpty {
@@ -257,10 +253,9 @@ public struct ReasoningEventEmitter: Sendable {
     private var watchedDelimiters: [String] {
         switch state {
         case .outside:
-            // A labeled channel's delimiters are special tokens, so an end
-            // delimiter arriving with no opener cannot be prose the model typed:
-            // it means the PROMPT opened the channel. Watch for it here so it is
-            // swallowed rather than leaked into the answer as a raw marker.
+            // A labeled channel's delimiters are special tokens, so an end delimiter
+            // with no opener means the prompt opened the channel. Watch for it here
+            // so it is swallowed instead of leaking into the answer.
             channel == nil ? [startDelimiter] : [startDelimiter, endDelimiter]
         case .label:
             []
@@ -291,10 +286,9 @@ public struct ReasoningEventEmitter: Sendable {
     /// Consumes a channel's role label and decides where its body routes. Returns
     /// `nil` while the label is still incomplete.
     ///
-    /// Every decision is made on where a terminator STARTS, never on how much text
-    /// has been buffered, because the two disagree: buffered length counts a
-    /// half-arrived end delimiter, so a rule phrased in terms of it classifies the
-    /// same bytes differently depending on where the transport split them.
+    /// Where the label ends is decided by where a terminator starts, never by how much
+    /// text has been buffered, so chunk boundaries cannot change the routing. Buffered
+    /// length decides only when to stop waiting for a terminator that never arrives.
     private mutating func resolveLabel(_ working: inout Substring) -> State? {
         guard let channel else { return .inside(.reasoning) }
 
@@ -303,13 +297,10 @@ public struct ReasoningEventEmitter: Sendable {
         let close = withinLabelWindow(
             working.range(of: endDelimiter), in: working, channel: channel)
 
-        // Closed before any terminator: an empty channel whose label never ended.
-        // There is no body and the label is metadata, so the whole thing goes.
-        //
-        // This still counts as a reasoning span closing. `isInsideReasoning` reports
-        // true while the label is being read, so a caller that stops on
-        // `hasClosedReasoning` (the think-then-call collector) would otherwise never
-        // be released by a malformed opener.
+        // Closed before any terminator: an empty channel whose label never ended. It
+        // has no body and the label is metadata, so all of it is consumed. It still
+        // latches `hasClosedReasoning`, or a malformed opener would never release a
+        // caller that waits on it.
         if let close, terminator.map({ close.lowerBound < $0.lowerBound }) ?? true {
             working = working[close.upperBound...]
             pendingLeadingTrim = true
@@ -324,11 +315,10 @@ public struct ReasoningEventEmitter: Sendable {
             return .inside(channel.responseLabels.contains(label) ? .response : .reasoning)
         }
 
-        // No terminator begins inside the window. Waiting is only pointless once
-        // enough text has arrived that one starting at the very last in-window
-        // position would have completed - before that, a terminator may still be
-        // half here. Nothing is consumed: the body scan re-reads this text, so a
-        // malformed opener shows its text rather than silently swallowing it.
+        // No terminator begins inside the window. Keep waiting until enough text has
+        // arrived that one starting at the last in-window position would have
+        // completed. Nothing is consumed, so the body scan re-reads this text and a
+        // malformed opener shows it rather than swallowing it.
         let settled =
             working.count
             >= channel.maxLabelLength + Swift.max(endDelimiter.count, channel.labelTerminator.count)

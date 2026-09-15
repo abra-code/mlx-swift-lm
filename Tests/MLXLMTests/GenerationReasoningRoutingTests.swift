@@ -1,6 +1,7 @@
 // Copyright © 2026 Apple Inc.
 
 import Foundation
+import MLX
 import Testing
 
 @testable import MLXLMCommon
@@ -159,16 +160,12 @@ struct GenerationReasoningRoutingTests {
     func implicitEndDelimiterExitsReasoningAndParses() {
         // `QwenReasoningProtocol` declares `<tool_call>` as an implicit exit: the model
         // opens a call straight out of its thinking block without closing `</think>`.
-        // The delimiter is content, not framing, so it must stay in the stream and reach
-        // the parser - dropping it would strand the call.
-        // Primed with no generated opener: Qwen's template prefills `<think>` into the
-        // prompt, so the model's first generated token is already thought content.
+        // The delimiter is content, not framing, so it must reach the parser.
+        // Primed because Qwen's template prefills `<think>` into the prompt.
         //
-        // `.qwen35` deliberately, not `.json`: the JSON format accepts a bare
-        // `{"name":...}` object with no tags at all, so the call would still parse even
-        // if `<tool_call>` had been swallowed as framing - the assertion would hold
-        // vacuously. `.qwen35` requires the tag, so this fails if the delimiter is
-        // consumed rather than left in the stream.
+        // `.qwen35`, not `.json`: JSON accepts a bare `{"name":...}` with no tags, so
+        // the call would parse even if `<tool_call>` had been swallowed and the
+        // assertion would hold vacuously. `.qwen35` requires the tag.
         let result = run(
             [
                 "call the tool",
@@ -235,6 +232,74 @@ struct GenerationReasoningRoutingTests {
         #expect(result.stopped)
         #expect(result.responseText == "visible")
         #expect(!result.responseText.contains("hidden"))
+    }
+
+    // MARK: - Prompt priming
+
+    /// Builds a prompt whose last token is a prefilled `<think>`, in the shape the
+    /// given rank produces: text processors emit `[N]`, VLM processors `[1, N]`.
+    private func primedPrompt(tokenCount: Int, rank: Int) -> (LMInput, any Tokenizer) {
+        let tokens = Array(repeating: 1, count: tokenCount - 1) + [2]
+        let array = MLXArray(tokens)
+        return (
+            LMInput(tokens: rank == 1 ? array : array.expandedDimensions(axis: 0)),
+            FragmentTokenizer(decoding: [1: "word ", 2: "<think>\n"])
+        )
+    }
+
+    private var primedConfiguration: ModelConfiguration {
+        ModelConfiguration(id: "test", reasoningConfig: .alwaysOnThinking)
+    }
+
+    @Test("A prefilled delimiter is detected in a one-dimensional prompt")
+    func primingDetectedForRank1Prompt() {
+        let (input, tokenizer) = primedPrompt(tokenCount: 100, rank: 1)
+
+        #expect(
+            promptPrimesReasoning(
+                input: input, modelConfiguration: primedConfiguration, tokenizer: tokenizer))
+    }
+
+    /// The same prompt in the shape every VLM processor emits. The tail slice runs on
+    /// the token array, so a batch axis must not be mistaken for the token axis.
+    @Test("A prefilled delimiter is detected in a batched prompt")
+    func primingDetectedForRank2Prompt() {
+        let (input, tokenizer) = primedPrompt(tokenCount: 100, rank: 2)
+
+        #expect(
+            promptPrimesReasoning(
+                input: input, modelConfiguration: primedConfiguration, tokenizer: tokenizer))
+    }
+
+    @Test("A prompt shorter than the tail window is still examined", arguments: [1, 2])
+    func primingDetectedForShortPrompt(rank: Int) {
+        let (input, tokenizer) = primedPrompt(tokenCount: 3, rank: rank)
+
+        #expect(
+            promptPrimesReasoning(
+                input: input, modelConfiguration: primedConfiguration, tokenizer: tokenizer))
+    }
+
+    @Test("A closed thought block in the prompt does not prime", arguments: [1, 2])
+    func closedBlockDoesNotPrime(rank: Int) {
+        let tokens = Array(repeating: 1, count: 99) + [2, 3]
+        let array = MLXArray(tokens)
+        let input = LMInput(tokens: rank == 1 ? array : array.expandedDimensions(axis: 0))
+        let tokenizer = FragmentTokenizer(decoding: [1: "word ", 2: "<think>", 3: "</think>"])
+
+        #expect(
+            !promptPrimesReasoning(
+                input: input, modelConfiguration: primedConfiguration, tokenizer: tokenizer))
+    }
+
+    @Test("A model with no reasoning config never primes")
+    func noReasoningConfigNeverPrimes() {
+        let (input, tokenizer) = primedPrompt(tokenCount: 100, rank: 1)
+
+        #expect(
+            !promptPrimesReasoning(
+                input: input, modelConfiguration: ModelConfiguration(id: "test"),
+                tokenizer: tokenizer))
     }
 
     // MARK: - isInsideReasoning
