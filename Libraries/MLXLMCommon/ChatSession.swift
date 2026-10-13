@@ -244,7 +244,7 @@ public final class ChatSession {
 
         /// Reasoning with nothing after it yet. A turn that ends here was cut off
         /// mid-thought, and replaying it would present the thought as complete.
-        private var openReasoning = ""
+        var openReasoning = ""
 
         var shouldRecord: Bool {
             (!content.isEmpty || !toolCalls.isEmpty || producedReasoning)
