@@ -2294,6 +2294,7 @@ public func generate(
 ///     holding the prompt should pass
 ///     ``ReasoningEventEmitter/promptEndsInsideReasoning(promptTokens:config:tokenizer:)``;
 ///     leaving it `false` would misroute a primed model's whole thought block into `.chunk`.
+///     Check the whole rendered prompt, not only the part a prompt cache left to prefill.
 /// - Returns: An `AsyncStream` that emits `Generation` values and a `Task`
 public func generateTask<TOKEN: TokenIteratorProtocol>(
     promptTokenCount: Int,
@@ -2370,18 +2371,17 @@ func promptPrimesReasoning(
     // Flatten first. VLM processors emit `[1, N]`, and a range subscript slices axis 0,
     // so slicing the unflattened array would take the batch axis, not the tokens.
     let tokens = input.text.tokens.flattened()
-    let tail =
-        tokens.size > promptTailTokenCount
-        ? tokens[(tokens.size - promptTailTokenCount)...]
-        : tokens
-    return ReasoningEventEmitter.promptEndsInsideReasoning(
-        promptTokens: tail.asArray(Int.self), config: config, tokenizer: tokenizer)
+    guard tokens.size > 0 else { return false }
+    var count = min(ReasoningEventEmitter.promptTailTokenCount, tokens.size)
+    while true {
+        let primed = ReasoningEventEmitter.promptEndsInsideReasoning(
+            tailTokens: tokens[(tokens.size - count)...].asArray(Int.self),
+            isWholePrompt: count == tokens.size,
+            config: config, tokenizer: tokenizer)
+        if let primed { return primed }
+        count = min(tokens.size, count * 2)
+    }
 }
-
-/// How much of the prompt tail ``promptPrimesReasoning`` materializes. At least
-/// `ReasoningEventEmitter`'s own tail window, so slicing here cannot narrow what the
-/// emitter would have examined.
-private let promptTailTokenCount = 64
 
 /// Generates raw token IDs asynchronously using the provided language model input, parameters, and context.
 ///
@@ -3162,9 +3162,10 @@ public enum Generation: Sendable {
     /// Gemma 4's labeled channels) or a framed token protocol that carries its
     /// own reasoning channel (GPT-OSS Harmony, Onyx).
     ///
-    /// Reasoning is *not* part of ``chunk``, and these families' own chat
-    /// templates drop it from replayed history, so a caller recording the
-    /// assistant turn should record ``chunk`` alone.
+    /// Reasoning is *not* part of ``chunk``, so a caller recording the assistant
+    /// turn should record ``chunk`` alone as its content. Most of these families'
+    /// chat templates drop reasoning from replayed history. ``ChatSession`` keeps a
+    /// finished thought beside the message for the templates that replay it.
     case reasoning(String)
 
     /// Completion information summarizing token counts and performance metrics.

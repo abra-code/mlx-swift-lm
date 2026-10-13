@@ -1612,14 +1612,16 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 samplingConfiguration: samplingConfiguration
             )
 
-            var emitter = ReasoningEventEmitter(
-                config: reasoningConfig, primedInside: primedInside)
+            // The collector matches the delimiters by token id when the tokenizer
+            // has them as single tokens, and scans the decoded text otherwise.
+            var collector = ReasoningTokenCollector(
+                config: reasoningConfig, primedInside: primedInside,
+                tokenizer: context.tokenizer)
             let format = context.configuration.toolCallFormat ?? .json
             var protocolDecoder = format.makeProtocolTokenStreamDecoder(
                 tokenizer: context.tokenizer,
                 tools: nil,
                 stopStrings: context.configuration.effectiveStopStrings)
-            var detokenizer = context.tokenizer.makeStreamingDetokenizer()
             var reasoningTokenCount = 0
             var completionInfo: GenerateCompletionInfo?
             let (stream, task) = try generateProtocolTokensTask(
@@ -1667,16 +1669,13 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                             // token count. Closing delimiters are deliberately
                             // attributed to reasoning until the emitter consumes
                             // them, then the final usage count is clamped.
-                            if emitter.isInsideReasoning {
+                            if collector.isInsideReasoning {
                                 reasoningTokenCount += 1
                             }
-                            detokenizer.append(token: token)
-                            if let chunk = detokenizer.next() {
-                                for segment in emitter.process(chunk) {
-                                    await Self.send(
-                                        segment, responseEntryID: responseEntryID,
-                                        reasoningEntryID: reasoningEntryID, channel: channel)
-                                }
+                            for segment in collector.ingest(token) {
+                                await Self.send(
+                                    segment, responseEntryID: responseEntryID,
+                                    reasoningEntryID: reasoningEntryID, channel: channel)
                             }
                         }
                     case .info(let info):
@@ -1713,13 +1712,12 @@ public struct MLXLanguageModel: FoundationModels.LanguageModel, Sendable {
                 }
                 protocolDecoder = decoder
             } else {
-                let pending = detokenizer.finish().map { emitter.process($0) } ?? []
-                for segment in pending + emitter.finalize() {
+                for segment in collector.finalize() {
                     await Self.send(
                         segment, responseEntryID: responseEntryID,
                         reasoningEntryID: reasoningEntryID, channel: channel)
                 }
-                endedInsideReasoning = emitter.isInsideReasoning
+                endedInsideReasoning = collector.isInsideReasoning
             }
 
             // If generation ended while still inside a thinking block, the model

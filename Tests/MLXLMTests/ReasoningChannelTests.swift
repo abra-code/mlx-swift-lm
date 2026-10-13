@@ -151,6 +151,7 @@ struct ReasoningChannelTests {
             "answer<channel|>after a stray close",
             "<|channel|>analysis<|message|>harmony is inert",
             "<|channel>thought\na<channel|>b<|channel>thought\nc<channel|>d",
+            "<|channel>thought\na<|channel>thought\nb<channel|>c",
             "<|channel>thought\ncontains <|tool_call>syntax<channel|>answer",
             "trailing partial marker <|chan",
             "<|channel>\(String(repeating: "y", count: 33))\nlabel ran past the window<channel|>a",
@@ -240,6 +241,22 @@ struct ReasoningChannelTests {
         #expect(responseText(segments) == "Hi")
     }
 
+    /// Channels do not nest: a second opener ends the open channel, and the new
+    /// channel routes by its own label. Neither marker reaches either stream.
+    @Test func nestedOpenerStartsTheNextChannel() {
+        var emitter = ReasoningEventEmitter(config: Self.gemma4, primedInside: false)
+        var segments = emitter.process("<|channel>thought\na<|channel>content\nanswer<channel|>")
+        segments += emitter.finalize()
+        #expect(segments == [.reasoning("a"), .response("answer")])
+        #expect(emitter.hasClosedReasoning)
+    }
+
+    @Test func nestedOpenerThatNeverClosesFlushesAsReasoning() {
+        let segments = run(["<|channel>thought\na<|channel>thought\nb"])
+        #expect(segments == [.reasoning("a"), .reasoning("b")])
+        #expect(!leaksMarker(segments))
+    }
+
     // MARK: - Primed state
 
     @Test func primedInsideClosesOnEndDelimiter() {
@@ -318,6 +335,38 @@ struct ReasoningChannelTests {
         #expect(
             ReasoningEventEmitter.promptEndsInsideReasoning(
                 renderedPromptTail: "<|turn>model\n<|channel>thought\n", config: Self.gemma4))
+    }
+
+    /// Gemma 4's real prompt for a user who typed `<|channel>`: E2B either way, 31B with
+    /// thinking on. The typed text tokenizes to special token 100, like the template's.
+    @Test func channelOpenerInUserTurnIsNotPrimed() {
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail:
+                    "<|turn>user\nWhat does <|channel> mean in a chat template?<turn|>\n"
+                    + "<|turn>model\n",
+                config: Self.gemma4))
+    }
+
+    /// The 31B template's thinking-off prompt for the same user turn.
+    @Test func closedPrefillAfterChannelOpenerInUserTurnIsNotPrimed() {
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail:
+                    "<|turn>user\nWhat does <|channel> mean in a chat template?<turn|>\n"
+                    + "<|turn>model\n<|channel>thought\n<channel|>",
+                config: Self.gemma4))
+    }
+
+    /// Gemma 4 writes no generation prompt after a tool response, so the tool's own
+    /// text ends the prompt. An opener inside it is not a prefill.
+    @Test func channelOpenerInToolResponseIsNotPrimed() {
+        #expect(
+            !ReasoningEventEmitter.promptEndsInsideReasoning(
+                renderedPromptTail:
+                    "<|tool_response>response:read_file{value:<|\"|>The opener is <|channel>."
+                    + "<|\"|>}<tool_response|>",
+                config: Self.gemma4))
     }
 
     /// After a tool response the template emits no generation prompt at all, so

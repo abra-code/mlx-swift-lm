@@ -7,10 +7,9 @@ import MLXScriptedLM
 /// Decodes everything as an unterminated `<think>` block, so with a `ReasoningConfig` in
 /// play the whole turn routes to `.reasoning` and `.chunk` never fires.
 ///
-/// This models a PRIMED family (DeepSeek-R1 style), which is the realistic shape for
-/// `.alwaysOnThinking`: the same `decode` is used on the prompt tail, so
-/// `promptEndsInsideReasoning` sees an unterminated block and the emitter starts inside
-/// the reasoning span rather than consuming an opening delimiter from the generated text.
+/// The same `decode` is used on the prompt tail. Text follows its `<think>`, so
+/// `promptEndsInsideReasoning` does not treat the prompt as primed: the emitter opens on
+/// the `<think>` that starts the generated text instead, and nothing ever closes it.
 ///
 /// The decoded text grows with the token count so the streaming detokenizer sees a
 /// non-empty delta per step.

@@ -207,6 +207,8 @@ public final class ChatSession {
                 assistant.content,
                 toolCalls: assistant.toolCalls.isEmpty ? nil : assistant.toolCalls)
             message.prefilledReasoningStartDelimiter = assistant.prefilledReasoningStartDelimiter
+            message.reasoning =
+                assistant.finishedReasoning.isEmpty ? nil : assistant.finishedReasoning
             messages.append(message)
             return true
         }
@@ -229,13 +231,20 @@ public final class ChatSession {
         var stopReason: GenerateStopReason?
         var wasTerminatedByConsumer = false
 
-        /// Whether any `.reasoning` arrived, even though none of it is kept.
+        /// Whether any `.reasoning` arrived.
         ///
-        /// Reasoning stays out of ``content`` because these families' templates drop it
-        /// from replayed history. It is tracked anyway so a turn that produced only
-        /// thinking, such as one that hit `maxTokens` mid-thought, is not mistaken for
-        /// an empty generation and rolled back along with the user's message.
+        /// Reasoning stays out of ``content``. It is tracked so a turn that produced
+        /// only thinking, such as one that hit `maxTokens` mid-thought, is not mistaken
+        /// for an empty generation and rolled back along with the user's message.
         var producedReasoning = false
+
+        /// Reasoning the model finished: an answer or a tool call followed it.
+        /// Recorded beside the message for templates that replay it.
+        var finishedReasoning = ""
+
+        /// Reasoning with nothing after it yet. A turn that ends here was cut off
+        /// mid-thought, and replaying it would present the thought as complete.
+        private var openReasoning = ""
 
         var shouldRecord: Bool {
             (!content.isEmpty || !toolCalls.isEmpty || producedReasoning)
@@ -245,11 +254,16 @@ public final class ChatSession {
         }
 
         mutating func consume(_ item: Generation) {
+            if item.chunk != nil || item.toolCall != nil {
+                finishedReasoning += openReasoning
+                openReasoning = ""
+            }
             if let chunk = item.chunk {
                 content += chunk
             }
-            if item.reasoning != nil {
+            if let reasoning = item.reasoning {
                 producedReasoning = true
+                openReasoning += reasoning
             }
             if let toolCall = item.toolCall {
                 toolCalls.append(toolCall)
@@ -266,19 +280,10 @@ public final class ChatSession {
     private static func prefilledReasoningStartDelimiter(
         in promptTokens: [Int], config: ReasoningConfig?, tokenizer: any Tokenizer
     ) -> String? {
-        guard let delimiter = config?.startDelimiter, !delimiter.isEmpty else { return nil }
-
-        // Decode a tail, expanding when trailing whitespace could hide the delimiter.
-        var count = min(64, promptTokens.count)
-        while true {
-            let tail = tokenizer.decode(
-                tokenIds: Array(promptTokens.suffix(count)), skipSpecialTokens: false
-            ).trimmingCharacters(in: .whitespacesAndNewlines)
-            if tail.count >= delimiter.count || count == promptTokens.count {
-                return tail.hasSuffix(delimiter) ? delimiter : nil
-            }
-            count = min(promptTokens.count, count * 2)
-        }
+        guard let config, !config.startDelimiter.isEmpty else { return nil }
+        let primed = ReasoningEventEmitter.promptEndsInsideReasoning(
+            promptTokens: promptTokens, config: config, tokenizer: tokenizer)
+        return primed ? config.startDelimiter : nil
     }
 
     /// All mutable continuation state for one realized model cache.
@@ -1359,8 +1364,11 @@ public final class ChatSession {
                                     iterator: iterator,
                                     tools: toolValidationSchemas,
                                     toolCallPolicy: generateParameters.toolCallPolicy,
+                                    // The whole prompt, not `input`: the cache may leave
+                                    // less than the prefill to prefill.
                                     reasoningPrimedInside: promptPrimesReasoning(
-                                        input: input, modelConfiguration: modelConfiguration,
+                                        input: preparedInput,
+                                        modelConfiguration: modelConfiguration,
                                         tokenizer: tokenizer))
                             )
                         }
@@ -1487,7 +1495,7 @@ public final class ChatSession {
                                             tools: toolValidationSchemas,
                                             toolCallPolicy: generateParameters.toolCallPolicy,
                                             reasoningPrimedInside: promptPrimesReasoning(
-                                                input: input,
+                                                input: preparedInput,
                                                 modelConfiguration: modelConfiguration,
                                                 tokenizer: tokenizer)))
                                 }

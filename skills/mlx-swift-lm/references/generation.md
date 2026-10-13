@@ -64,7 +64,13 @@ channels) or a framed token protocol that carries its own reasoning channel (GPT
 Harmony, Onyx). Everything else streams as `.chunk` exactly as before.
 
 `ChatSession.streamResponse` yields the answer only; use `streamDetails` to observe
-`.reasoning` alongside tool calls.
+`.reasoning` alongside tool calls. The session records the answer as the assistant
+message. It keeps a finished thought beside that message, and only a model whose
+chat template replays reasoning (Qwen3-VL's `reasoning_content`) sends it back.
+
+When both reasoning delimiters are single tokens in the model's tokenizer, they are
+matched by token id. The same characters written out as ordinary text, for example
+when a model explains its own format, stay in the stream they appear in.
 
 ## Task-Handle Pattern for Early Stop
 

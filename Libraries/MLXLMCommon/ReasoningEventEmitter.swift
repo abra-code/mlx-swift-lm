@@ -26,14 +26,25 @@
 /// is answer/tool content and stays in the stream to be re-scanned outside.
 /// `pendingPrefix` holds text that may be a delimiter split across a chunk
 /// boundary. For a delimiter pair, a start delimiter always (re)opens a reasoning
-/// span, so multiple blocks each route. The known cost is that a literal `<think>`
-/// in answer text is misrouted; token-id detection is the real fix.
+/// span, so multiple blocks each route. For a labeled channel, a start delimiter
+/// inside an open channel also ends it, since channels do not nest.
+///
+/// **Delimiters as tokens.** Scanning text misroutes a delimiter the model only
+/// spells out in its answer. The generation loop avoids that when both delimiters
+/// are single tokens: it reports them by id through `process(boundary:)`, and their
+/// text is then ordinary content. Callers that feed text alone keep the text scan.
 public struct ReasoningEventEmitter: Sendable {
 
     /// A routed slice of the decoded stream.
     public enum Segment: Sendable, Equatable {
         case reasoning(String)
         case response(String)
+    }
+
+    /// A framing delimiter that arrived as its own token.
+    package enum Boundary: Sendable {
+        case start
+        case end
     }
 
     /// Which stream the text being scanned belongs to.
@@ -56,6 +67,11 @@ public struct ReasoningEventEmitter: Sendable {
     private let startDelimiter: String
     private let endDelimiter: String
     private let endDelimiters: [String]
+    private let implicitEndDelimiters: [String]
+
+    /// False when the caller reports the framing delimiters by token id. Their text
+    /// is then content, and only implicit end delimiters are scanned for.
+    private var scansFramingText: Bool
 
     /// The labeled-channel protocol, or `nil` for a plain delimiter pair.
     private let channel: ReasoningChannel?
@@ -82,13 +98,24 @@ public struct ReasoningEventEmitter: Sendable {
     public private(set) var hasClosedReasoning: Bool = false
 
     public init(config: ReasoningConfig, primedInside: Bool) {
+        self.init(config: config, primedInside: primedInside, scansFramingText: true)
+    }
+
+    /// - Parameter scansFramingText: pass `false` when every start and end delimiter
+    ///   is reported through ``process(boundary:)`` instead of as text.
+    package init(config: ReasoningConfig, primedInside: Bool, scansFramingText: Bool) {
+        self.scansFramingText = scansFramingText
         self.startDelimiter = config.startDelimiter
         self.endDelimiter = config.endDelimiter
+        // Channels do not nest, so an opener inside one ends it like an implicit exit
+        // and is then re-scanned to open the next channel.
+        let nestedOpener = config.channel == nil ? [] : [config.startDelimiter]
+        self.implicitEndDelimiters = config.implicitEndDelimiters.filter {
+            $0 != config.endDelimiter
+        }
         self.endDelimiters =
-            [config.endDelimiter]
-            + config.implicitEndDelimiters.filter {
-                $0 != config.endDelimiter
-            }
+            [config.endDelimiter] + implicitEndDelimiters
+            + nestedOpener.filter { $0 != config.endDelimiter }
         self.channel = config.channel
         // A prompt can only prime a *reasoning* span: prefilling the answer
         // channel would mean the template wrote the answer.
@@ -108,23 +135,28 @@ public struct ReasoningEventEmitter: Sendable {
     /// The check must NOT be a naive `hasSuffix(startDelimiter)`: templates
     /// routinely append a trailing newline (`<think>\n`) after the prefill, so a
     /// strict suffix test returns false and silently misroutes 100% of reasoning.
-    /// Instead: trim trailing whitespace, then test whether the last start
-    /// delimiter is not followed by a matching end delimiter.
+    /// Instead: trim trailing whitespace, then require the prompt to end with the
+    /// start delimiter, or for a labeled channel, with the start delimiter and a label.
+    ///
+    /// A start delimiter followed by any other text came from earlier content, such as
+    /// a user message or a tool result. A typed `<think>` tokenizes to the template's
+    /// own id, so only its position tells the two apart.
     public static func promptEndsInsideReasoning(
         renderedPromptTail tail: String, config: ReasoningConfig
     ) -> Bool {
         guard !config.startDelimiter.isEmpty else { return false }
         var trimmed = Substring(tail)
         while let last = trimmed.last, last.isWhitespace { trimmed = trimmed.dropLast() }
-        guard let lastStart = trimmed.range(of: config.startDelimiter, options: .backwards) else {
-            return false
-        }
-        let afterStart = trimmed[lastStart.upperBound...]
-        return ([config.endDelimiter] + config.implicitEndDelimiters)
-            .filter { !$0.isEmpty }
-            .allSatisfy {
-                afterStart.range(of: $0) == nil
-            }
+        if trimmed.hasSuffix(config.startDelimiter) { return true }
+
+        // A prefilled channel may also carry its label, a single word as in
+        // `<|channel>thought\n`. Markers and other tokens are not labels.
+        guard let channel = config.channel,
+            let lastStart = trimmed.range(of: config.startDelimiter, options: .backwards)
+        else { return false }
+        let label = trimmed[lastStart.upperBound...]
+        return label.count <= channel.maxLabelLength
+            && label.allSatisfy { $0.isLetter || $0.isNumber || $0 == "_" }
     }
 
     /// Whether a rendered prompt, given as its token ids, ends inside an open
@@ -136,15 +168,35 @@ public struct ReasoningEventEmitter: Sendable {
     public static func promptEndsInsideReasoning(
         promptTokens: [Int], config: ReasoningConfig, tokenizer: any Tokenizer
     ) -> Bool {
-        promptEndsInsideReasoning(
-            renderedPromptTail: tokenizer.decode(
-                tokenIds: Array(promptTokens.suffix(promptTailTokenCount))),
-            config: config)
+        var count = min(promptTailTokenCount, promptTokens.count)
+        while true {
+            let primed = promptEndsInsideReasoning(
+                tailTokens: promptTokens.suffix(count),
+                isWholePrompt: count == promptTokens.count,
+                config: config, tokenizer: tokenizer)
+            if let primed { return primed }
+            count = min(promptTokens.count, count * 2)
+        }
     }
 
-    /// How many trailing prompt tokens ``promptEndsInsideReasoning(promptTokens:config:tokenizer:)``
-    /// decodes. Well above the few tokens a prefill occupies.
-    private static let promptTailTokenCount = 64
+    /// Decides from the last tokens of a prompt, or returns `nil` when trailing
+    /// whitespace fills so much of them that a prefill could lie further back.
+    static func promptEndsInsideReasoning(
+        tailTokens: some Sequence<Int>, isWholePrompt: Bool,
+        config: ReasoningConfig, tokenizer: any Tokenizer
+    ) -> Bool? {
+        let tail = tokenizer.decode(tokenIds: Array(tailTokens))
+        if !isWholePrompt {
+            let visible = tail.count - tail.reversed().prefix(while: \.isWhitespace).count
+            let prefill = config.startDelimiter.count + (config.channel?.maxLabelLength ?? 0)
+            if visible < prefill { return nil }
+        }
+        return promptEndsInsideReasoning(renderedPromptTail: tail, config: config)
+    }
+
+    /// How many trailing prompt tokens are decoded first. Well above the few tokens
+    /// a prefill occupies.
+    static let promptTailTokenCount = 64
 
     /// Whether the scanner is currently inside a reasoning span.
     ///
@@ -227,6 +279,20 @@ public struct ReasoningEventEmitter: Sendable {
         return output
     }
 
+    /// Applies a framing delimiter that arrived as its own token, for an emitter
+    /// created with `scansFramingText: false`.
+    ///
+    /// The boundary goes through the same transitions as its text would, so both
+    /// modes route alike.
+    package mutating func process(boundary: Boundary) -> [Segment] {
+        // A second opener abandons a label that never ended. Its text is reasoning.
+        if case .label = state, boundary == .start { state = .inside(.reasoning) }
+        let scanned = scansFramingText
+        scansFramingText = true
+        defer { scansFramingText = scanned }
+        return process(boundary == .start ? startDelimiter : endDelimiter)
+    }
+
     /// Flushes any held-back text at end of generation.
     ///
     /// If the stream ends mid-reasoning (no closing delimiter ever arrived —
@@ -251,18 +317,23 @@ public struct ReasoningEventEmitter: Sendable {
 
     /// The delimiters watched in the current state, earliest match wins.
     private var watchedDelimiters: [String] {
+        guard scansFramingText else {
+            if case .inside = state { return implicitEndDelimiters }
+            return []
+        }
         switch state {
         case .outside:
             // A labeled channel's delimiters are special tokens, so an end delimiter
             // with no opener means the prompt opened the channel. Watch for it here
             // so it is swallowed instead of leaking into the answer.
-            channel == nil ? [startDelimiter] : [startDelimiter, endDelimiter]
+            return channel == nil ? [startDelimiter] : [startDelimiter, endDelimiter]
         case .label:
-            []
+            return []
         case .inside:
             // Canonical close plus any protocol-declared implicit exits, e.g.
-            // Qwen3.5 opening `<tool_call>` straight out of its thinking block.
-            endDelimiters
+            // Qwen3.5 opening `<tool_call>` straight out of its thinking block, and
+            // for a labeled channel the opener of the next channel.
+            return endDelimiters
         }
     }
 
@@ -294,8 +365,10 @@ public struct ReasoningEventEmitter: Sendable {
 
         let terminator = withinLabelWindow(
             working.range(of: channel.labelTerminator), in: working, channel: channel)
-        let close = withinLabelWindow(
-            working.range(of: endDelimiter), in: working, channel: channel)
+        let close =
+            scansFramingText
+            ? withinLabelWindow(working.range(of: endDelimiter), in: working, channel: channel)
+            : nil
 
         // Closed before any terminator: an empty channel whose label never ended. It
         // has no body and the label is metadata, so all of it is consumed. It still
