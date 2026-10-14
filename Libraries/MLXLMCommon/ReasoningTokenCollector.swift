@@ -17,8 +17,9 @@
 /// executor — makes the logic host-testable with no model. The unconstrained
 /// reasoning path uses it too.
 ///
-/// When both delimiters are single tokens, they are matched by id and reported to
-/// the emitter as boundaries, so the same characters spelled out as text are content.
+/// When both framing delimiters are single tokens, they and any single-token implicit
+/// end delimiter are matched by id and reported to the emitter as boundaries, so the
+/// same characters spelled out as text are content.
 public struct ReasoningTokenCollector {
 
     private var emitter: ReasoningEventEmitter
@@ -42,8 +43,7 @@ public struct ReasoningTokenCollector {
         let delimiterTokens = ReasoningDelimiterTokens(config: config, tokenizer: tokenizer)
         self.delimiterTokens = delimiterTokens
         self.emitter = ReasoningEventEmitter(
-            config: config, primedInside: primedInside,
-            scansFramingText: delimiterTokens == nil)
+            config: config, primedInside: primedInside, delimiterTokens: delimiterTokens)
         self.tokenizer = tokenizer
         self.detokenizer = tokenizer.makeStreamingDetokenizer()
     }
@@ -65,7 +65,7 @@ public struct ReasoningTokenCollector {
     /// character or a partial delimiter held back across the chunk boundary.
     public mutating func ingest(_ token: Int) -> [ReasoningEventEmitter.Segment] {
         reasoningTokenIDs.append(token)
-        if let boundary = delimiterTokens?.boundary(for: token) {
+        if let boundary = delimiterTokens?.boundary(for: token), emitter.isBoundary(boundary) {
             // Text the detokenizer still holds precedes the boundary.
             let pending = detokenizer.finish().map { emitter.process($0) } ?? []
             detokenizer = tokenizer.makeStreamingDetokenizer()

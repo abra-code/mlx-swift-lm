@@ -71,7 +71,8 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
     private var reasoningEmitter: ReasoningEventEmitter?
 
     /// Set when the reasoning delimiters are single tokens. They are then matched
-    /// by id, and the emitter does not scan for their text.
+    /// by id, and the emitter does not scan for their text. The same holds for each
+    /// implicit end delimiter that is a single token.
     private let reasoningTokens: ReasoningDelimiterTokens?
 
     init(
@@ -94,7 +95,7 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
         self.reasoningEmitter = reasoning.map {
             ReasoningEventEmitter(
                 config: $0.config, primedInside: $0.primedInside,
-                scansFramingText: reasoningTokens == nil)
+                delimiterTokens: reasoningTokens)
         }
     }
 
@@ -104,7 +105,9 @@ struct StandardTokenStreamDecoder: TokenStreamDecoder {
     var isInsideReasoning: Bool { reasoningEmitter?.isInsideReasoning ?? false }
 
     mutating func push(_ token: Int, emit: (TokenStreamEvent) -> Bool) -> Bool {
-        if let boundary = reasoningTokens?.boundary(for: token) {
+        if let boundary = reasoningTokens?.boundary(for: token),
+            reasoningEmitter?.isBoundary(boundary) == true
+        {
             return push(boundary, emit: emit)
         }
         detokenizer.append(token: token)

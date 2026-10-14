@@ -32,7 +32,8 @@
 /// **Delimiters as tokens.** Scanning text misroutes a delimiter the model only
 /// spells out in its answer. The generation loop avoids that when both delimiters
 /// are single tokens: it reports them by id through `process(boundary:)`, and their
-/// text is then ordinary content. Callers that feed text alone keep the text scan.
+/// text is then ordinary content. An implicit end delimiter that is a single token
+/// is reported the same way. Callers that feed text alone keep the text scan.
 public struct ReasoningEventEmitter: Sendable {
 
     /// A routed slice of the decoded stream.
@@ -41,10 +42,12 @@ public struct ReasoningEventEmitter: Sendable {
         case response(String)
     }
 
-    /// A framing delimiter that arrived as its own token.
-    package enum Boundary: Sendable {
+    /// A delimiter that arrived as its own token.
+    package enum Boundary: Sendable, Equatable {
         case start
         case end
+        /// One of ``ReasoningConfig/implicitEndDelimiters``, by its text.
+        case implicitEnd(String)
     }
 
     /// Which stream the text being scanned belongs to.
@@ -67,11 +70,13 @@ public struct ReasoningEventEmitter: Sendable {
     private let startDelimiter: String
     private let endDelimiter: String
     private let endDelimiters: [String]
-    private let implicitEndDelimiters: [String]
 
     /// False when the caller reports the framing delimiters by token id. Their text
-    /// is then content, and only implicit end delimiters are scanned for.
+    /// is then content, and only ``scannedImplicitEndDelimiters`` are scanned for.
     private var scansFramingText: Bool
+
+    /// The implicit end delimiters the caller does not report by token id.
+    private let scannedImplicitEndDelimiters: [String]
 
     /// The labeled-channel protocol, or `nil` for a plain delimiter pair.
     private let channel: ReasoningChannel?
@@ -98,19 +103,23 @@ public struct ReasoningEventEmitter: Sendable {
     public private(set) var hasClosedReasoning: Bool = false
 
     public init(config: ReasoningConfig, primedInside: Bool) {
-        self.init(config: config, primedInside: primedInside, scansFramingText: true)
+        self.init(config: config, primedInside: primedInside, delimiterTokens: nil)
     }
 
-    /// - Parameter scansFramingText: pass `false` when every start and end delimiter
-    ///   is reported through ``process(boundary:)`` instead of as text.
-    package init(config: ReasoningConfig, primedInside: Bool, scansFramingText: Bool) {
-        self.scansFramingText = scansFramingText
+    /// - Parameter delimiterTokens: the delimiters the caller reports through
+    ///   ``process(boundary:)`` instead of as text, or `nil` to scan for all of them.
+    init(config: ReasoningConfig, primedInside: Bool, delimiterTokens: ReasoningDelimiterTokens?) {
+        self.scansFramingText = delimiterTokens == nil
+        let reported = delimiterTokens?.implicitEndDelimiters ?? []
+        self.scannedImplicitEndDelimiters = config.implicitEndDelimiters.filter {
+            $0 != config.endDelimiter && !reported.contains($0)
+        }
         self.startDelimiter = config.startDelimiter
         self.endDelimiter = config.endDelimiter
         // Channels do not nest, so an opener inside one ends it like an implicit exit
         // and is then re-scanned to open the next channel.
         let nestedOpener = config.channel == nil ? [] : [config.startDelimiter]
-        self.implicitEndDelimiters = config.implicitEndDelimiters.filter {
+        let implicitEndDelimiters = config.implicitEndDelimiters.filter {
             $0 != config.endDelimiter
         }
         self.endDelimiters =
@@ -279,18 +288,30 @@ public struct ReasoningEventEmitter: Sendable {
         return output
     }
 
-    /// Applies a framing delimiter that arrived as its own token, for an emitter
-    /// created with `scansFramingText: false`.
+    /// Whether a delimiter token is a boundary in the current state. An implicit end
+    /// delimiter outside a thought ends nothing, so the caller decodes it as text.
+    package func isBoundary(_ boundary: Boundary) -> Bool {
+        if case .implicitEnd = boundary { return isInsideReasoning }
+        return true
+    }
+
+    /// Applies a delimiter that arrived as its own token, for an emitter created
+    /// with delimiter tokens.
     ///
     /// The boundary goes through the same transitions as its text would, so both
     /// modes route alike.
     package mutating func process(boundary: Boundary) -> [Segment] {
-        // A second opener abandons a label that never ended. Its text is reasoning.
-        if case .label = state, boundary == .start { state = .inside(.reasoning) }
+        // A second opener or an implicit end abandons a label that never ended. Its
+        // text is reasoning.
+        if case .label = state, boundary != .end { state = .inside(.reasoning) }
         let scanned = scansFramingText
         scansFramingText = true
         defer { scansFramingText = scanned }
-        return process(boundary == .start ? startDelimiter : endDelimiter)
+        switch boundary {
+        case .start: return process(startDelimiter)
+        case .end: return process(endDelimiter)
+        case .implicitEnd(let delimiter): return process(delimiter)
+        }
     }
 
     /// Flushes any held-back text at end of generation.
@@ -318,7 +339,7 @@ public struct ReasoningEventEmitter: Sendable {
     /// The delimiters watched in the current state, earliest match wins.
     private var watchedDelimiters: [String] {
         guard scansFramingText else {
-            if case .inside = state { return implicitEndDelimiters }
+            if case .inside = state { return scannedImplicitEndDelimiters }
             return []
         }
         switch state {
